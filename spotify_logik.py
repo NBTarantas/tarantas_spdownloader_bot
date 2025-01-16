@@ -387,14 +387,10 @@ def download_track_for_zip(temp_folder, track, mp3_path, progress):
     """Оновлена функція завантаження треку для ZIP архіву"""
     try:
         track_name = f"{track['artist']} - {track['name']}"
-        safe_track_name = safe_transliterate(track_name)
-        temp_path = os.path.join(temp_folder, f"{track_name}.waw")
-        print(temp_path)
-        final_path = mp3_path
-
-        # Get the directory path and ensure it exists
-        output_dir = os.path.dirname(mp3_path)
-        os.makedirs(output_dir, exist_ok=True)
+        file_path = f"{temp_folder}/{track_name}"
+        mp3_path = f"{temp_folder}/{track_name}.mp3"
+        temp_path = os.path.join(temp_folder, f"{track_name}_temp")
+        final_path = os.path.join(temp_folder, f"{track_name}.mp3")
 
         # Пошук треку
         progress.update_progress(10)
@@ -404,8 +400,10 @@ def download_track_for_zip(temp_folder, track, mp3_path, progress):
 
         progress.update_progress(20)
 
+        # Налаштування для yt-dlp з колбеком прогресу
         def ydl_progress_hook(d):
             if d['status'] == 'downloading':
+                # Прогрес завантаження від 20% до 60%
                 try:
                     downloaded = d.get('downloaded_bytes', 0)
                     total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
@@ -415,32 +413,26 @@ def download_track_for_zip(temp_folder, track, mp3_path, progress):
                 except:
                     pass
 
-
-        # Оновлені налаштування для yt-dlp
         ydl_opts = {
-            "format": "bestaudio/best",
+            "format": AUDIO_QUALITY['format'],
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": AUDIO_QUALITY['audio_format'],
                 "preferredquality": AUDIO_QUALITY['audio_quality'],
             }],
-            'ffmpeg_location': 'tools/FFMpeg/',
-            "outtmpl": os.path.splitext(f"{mp3_path}_temp")[0] + ".%(ext)s",
+            'ffmpeg_location': 'D:\\NBurc\\AI_App\\FFMpeg',
+            "outtmpl": temp_path,
             "progress_hooks": [ydl_progress_hook],
             'verbose': True,
-            # Додаткові параметри для обходу обмежень
-
         }
 
         # Завантаження
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
-            except yt_dlp.utils.DownloadError as e:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
 
-                logger.exception(f"First attempt failed: {str(e)}")
+        progress.update_progress(58)
 
-        process_audio_quality(temp_path, final_path)
+        process_audio_quality(f"{temp_path}.wav", final_path)
 
         progress.update_progress(60)
 

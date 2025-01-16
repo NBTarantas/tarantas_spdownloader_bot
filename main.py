@@ -153,12 +153,18 @@ def handle_callback(call):
         if not tracks:
             bot.answer_callback_query(call.id, "Помилка: треки не знайдено")
             return
-
-        delivery_method = user_delivery_method.get(user_id)
-        if delivery_method == "zip":
+        if call.data.startswith("track_") & (user_delivery_method.get(user_id) == "zip"):
+            track_index = int(call.data.split('_')[1])
+            tracks = [user_tracks[user_id][track_index]]  # Обираємо лише один трек
             handle_zip_download(call, tracks)
         else:
-            handle_single_download(call, tracks)
+
+
+            delivery_method = user_delivery_method.get(user_id)
+            if delivery_method == "zip":
+                handle_zip_download(call, tracks)
+            else:
+                handle_single_download(call, tracks)
 
     except Exception as e:
         logger.exception(f"Error in callback handler: {str(e)}")
@@ -267,33 +273,46 @@ def safe_transliterate(text):
         return re.sub(r'[^\w\s-]', '', text)  # Чекаємо перед повторною спробою
 
 
-def split_file(file_path, chunk_size=49 * 1024 * 1024):  # 49 MB chunks
-    if os.path.getsize(file_path) <= chunk_size:
-        return [file_path]
+def split_file(tracks, temp_folder, max_size=6 * 1024 * 1024):
+    """
+    Розділяє список треків на кілька ZIP-архівів, щоб кожен не перевищував заданий розмір.
+    :param tracks: Список шляхів до файлів треків.
+    :param temp_folder: Шлях до тимчасової папки для збереження ZIP-файлів.
+    :param max_size: Максимальний розмір одного ZIP-архіву в байтах.
+    :return: Список шляхів до створених ZIP-архівів.
+    """
+    zip_files = []  # Список для збереження шляхів до архівів
+    current_zip_size = 0  # Поточний розмір архіву
+    current_zip_index = 1  # Лічильник для назв архівів
+    current_zip_path = os.path.join(temp_folder, f"playlist_part{current_zip_index}.zip")
 
-    base_name = os.path.splitext(file_path)[0]
-    extension = os.path.splitext(file_path)[1]
-    chunks = []
+    # Відкриваємо перший ZIP-файл
+    zip_file = zipfile.ZipFile(current_zip_path, 'w', zipfile.ZIP_DEFLATED)
 
-    with open(file_path, 'rb') as f:
-        chunk_number = 1
-        while True:
-            chunk_data = f.read(chunk_size)
-            if not chunk_data:
-                break
+    for track in tracks:
+        track_size = os.path.getsize(track)  # Отримуємо розмір файлу треку
 
-            chunk_path = f"{base_name}_part{chunk_number}{extension}"
-            with open(chunk_path, 'wb') as chunk_file:
-                chunk_file.write(chunk_data)
-            chunks.append(chunk_path)
-            chunk_number += 1
+        # Перевіряємо, чи влізе трек у поточний архів
+        if current_zip_size + track_size > max_size:
+            # Закриваємо поточний ZIP-архів
+            zip_file.close()
+            zip_files.append(current_zip_path)
 
-    # Перевірка, що всі частини доступні
-    for chunk_path in chunks:
-        if not os.path.exists(chunk_path) or os.path.getsize(chunk_path) == 0:
-            raise Exception(f"Частина файлу {chunk_path} створена некоректно")
+            # Створюємо новий архів
+            current_zip_index += 1
+            current_zip_path = os.path.join(temp_folder, f"playlist_part{current_zip_index}.zip")
+            zip_file = zipfile.ZipFile(current_zip_path, 'w', zipfile.ZIP_DEFLATED)
+            current_zip_size = 0  # Скидаємо розмір архіву
 
-    return chunks
+        # Додаємо трек до поточного архіву
+        zip_file.write(track, arcname=os.path.basename(track))
+        current_zip_size += track_size
+
+    # Закриваємо останній архів і додаємо його до списку
+    zip_file.close()
+    zip_files.append(current_zip_path)
+
+    return zip_files
 
 
 def handle_zip_download(call, tracks):
@@ -325,10 +344,8 @@ def handle_zip_download(call, tracks):
                     status_message.message_id
                 )
 
-                safe_track_name = transliterate.translit(
-                    f"{track['artist']} - {track['name']}",
-                    reversed=True
-                )
+                safe_track_name = re.sub("&","and",f"{track['artist']} - {track['name']}")
+
                 file_path = os.path.join(temp_folder, f"{safe_track_name}.mp3")
 
                 # Завантажуємо трек
@@ -356,77 +373,35 @@ def handle_zip_download(call, tracks):
                 status_message.message_id
             )
 
-            zip_path = os.path.join(temp_folder, "playlist.zip")
-            with zipfile.ZipFile(zip_path, 'r') as zip_file:
-                file_list = zip_file.namelist()
 
-            chunk_size = 1  # Мінімум один трек у кожній частині
-            chunks = [file_list[i:i + chunk_size] for i in range(0, len(file_list), chunk_size)]
-            base_name = os.path.splitext(file_path)[0]
-            for i, chunk_files in enumerate(chunks):
-                part_path = f"{base_name}_part{i + 1}.zip"
-                with zipfile.ZipFile(part_path, 'w', zipfile.ZIP_DEFLATED) as part_zip:
-                    for file in chunk_files:
-                        with zip_file.open(file) as source_file:
-                            part_zip.writestr(file, source_file.read())
+            chunks = split_file(downloaded_tracks, temp_folder)
 
-            # Перевіряємо розмір архіву
-            if os.path.getsize(zip_path) > 49 * 1024 * 1024:  # Якщо більше 49 MB
-                bot.edit_message_text(
-                    "📤 Файл завеликий для прямого надсилання. Розділяю на частини...",
-                    call.message.chat.id,
-                    status_message.message_id
-                )
+            # Надсилаємо кожну частину
+            for i, chunk_path in enumerate(chunks, 1):
+                try:
+                    bot.edit_message_text(
+                        f"📤 Надсилання частини {i}/{len(chunks)}...",
+                        call.message.chat.id,
+                        status_message.message_id
+                    )
 
-                # Розділяємо на частини
-                chunks = split_file(zip_path)
+                    send_large_file(
+                        bot,
+                        call.message.chat.id,
+                        chunk_path,
+                        caption=f"Частина {i} з {len(chunks)} - "
+                                f"Завантажено {len(downloaded_tracks)}/{total_tracks} треків"
+                    )
 
-                # Надсилаємо кожну частину
-                for i, chunk_path in enumerate(chunks, 1):
-                    try:
-                        bot.edit_message_text(
-                            f"📤 Надсилання частини {i}/{len(chunks)}...",
-                            call.message.chat.id,
-                            status_message.message_id
-                        )
+                    # Видаляємо частину після надсилання
+                    os.remove(chunk_path)
 
-                        send_large_file(
-                            bot,
-                            call.message.chat.id,
-                            chunk_path,
-                            caption=f"Частина {i} з {len(chunks)} - "
-                                    f"Завантажено {len(downloaded_tracks)}/{total_tracks} треків"
-                        )
+                except Exception as e:
+                    bot.send_message(
+                        call.message.chat.id,
+                        f"❌ Помилка при надсиланні частини {i}: {str(e)}"
+                    )
 
-                        # Видаляємо частину після надсилання
-                        os.remove(chunk_path)
-
-                    except Exception as e:
-                        bot.send_message(
-                            call.message.chat.id,
-                            f"❌ Помилка при надсиланні частини {i}: {str(e)}"
-                        )
-            else:
-                # Якщо файл не завеликий, надсилаємо його напряму
-                bot.edit_message_text(
-                    "📤 Надсилання архіву...",
-                    call.message.chat.id,
-                    status_message.message_id
-                )
-
-                send_large_file(
-                    bot,
-                    call.message.chat.id,
-                    zip_path,
-                    caption=f"✅ Завантажено {len(downloaded_tracks)}/{total_tracks} треків"
-                )
-
-            # Видаляємо оригінальний ZIP-файл
-            os.remove(zip_path)
-
-        # Очищення
-        cleanup_temp_folder(temp_folder)
-        del user_temp_folders[user_id]
 
     except Exception as e:
         logger.exception(f"Error in ZIP download: {str(e)}")
